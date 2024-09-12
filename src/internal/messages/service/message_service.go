@@ -21,13 +21,13 @@ type IMessageService interface {
 }
 
 type MessageService struct {
-	messageRepository    messageRepository.IMessageRepository
-	messageSendClient    *clients.MessageSend
-	messageMap           map[string]struct{}
-	stopChan             chan struct{}
-	wg                   sync.WaitGroup
-	isSentMessageRunning bool
-	redisClient          *redis.Client
+	messageRepository messageRepository.IMessageRepository
+	messageSendClient *clients.MessageSend
+	stopChan          chan struct{}
+	wg                sync.WaitGroup
+	isSendingRunning  bool
+	redisClient       *redis.Client
+	sentMessageMap    sync.Map
 }
 
 func NewMessageService(messageRepository messageRepository.IMessageRepository) IMessageService {
@@ -41,12 +41,11 @@ func NewMessageService(messageRepository messageRepository.IMessageRepository) I
 	})
 
 	return &MessageService{
-		messageRepository:    messageRepository,
-		messageSendClient:    messageClient,
-		messageMap:           make(map[string]struct{}),
-		stopChan:             make(chan struct{}),
-		isSentMessageRunning: false,
-		redisClient:          redisClient,
+		messageRepository: messageRepository,
+		messageSendClient: messageClient,
+		stopChan:          make(chan struct{}),
+		isSendingRunning:  false,
+		redisClient:       redisClient,
 	}
 }
 
@@ -61,11 +60,12 @@ func (ms *MessageService) GetSentMessages() ([]models.Message, error) {
 }
 
 func (ms *MessageService) StartSendingMessage() {
-	if ms.isSentMessageRunning {
+	if ms.isSendingRunning {
 		log.Info("Message sending is already running")
 		return
 	}
-	ms.isSentMessageRunning = true
+
+	ms.isSendingRunning = true
 	duration := cfg.GetConfigs().MessageSendDuration
 	ticker := time.NewTicker(duration * time.Minute)
 	defer ticker.Stop()
@@ -74,27 +74,34 @@ func (ms *MessageService) StartSendingMessage() {
 		select {
 		case <-ticker.C:
 			ms.wg.Add(1)
-			func() {
+			go func() {
 				defer ms.wg.Done()
 				log.Info("Sending pending messages")
-				err := ms.sendPendingMessages()
-				if err != nil {
+				if err := ms.sendPendingMessages(); err != nil {
 					log.Error("Error while sending messages: %v", err)
 				}
 			}()
 		case <-ms.stopChan:
 			log.Info("Message sending stopped")
 			ms.wg.Wait()
+			ms.isSendingRunning = false
 			return
 		}
 	}
 }
 
 func (ms *MessageService) StopSending() {
+	if !ms.isSendingRunning {
+		return
+	}
+
 	close(ms.stopChan)
 	ms.wg.Wait()
-	ms.messageMap = make(map[string]struct{})
-	ms.isSentMessageRunning = false
+	ms.sentMessageMap.Range(func(key, _ any) bool {
+		ms.sentMessageMap.Delete(key)
+		return true
+	})
+	ms.isSendingRunning = false
 }
 
 func (ms *MessageService) sendPendingMessages() error {
@@ -108,10 +115,12 @@ func (ms *MessageService) sendPendingMessages() error {
 	for _, message := range unsentMessages {
 		msg := message
 		g.Go(func() error {
-			if _, exists := ms.messageMap[msg.ID]; exists {
+			// Check if message has already been sent (concurrent-safe)
+			if _, exists := ms.sentMessageMap.Load(msg.ID); exists {
 				return nil
 			}
-			ms.messageMap[msg.ID] = struct{}{}
+
+			ms.sentMessageMap.Store(msg.ID, struct{}{}) // Mark as sent
 
 			tx, err := ms.messageRepository.BeginTransaction()
 			if err != nil {
@@ -119,21 +128,19 @@ func (ms *MessageService) sendPendingMessages() error {
 			}
 			defer tx.Rollback(ctx)
 
-			err = ms.sendMessageToPhone(msg)
-			if err != nil {
+			if err := ms.sendMessageToPhone(msg); err != nil {
 				return err
 			}
 
-			err = ms.messageRepository.MarkMessageAsSent(msg.ID, tx)
-			if err != nil {
+			if err := ms.messageRepository.MarkMessageAsSent(msg.ID, tx); err != nil {
 				return err
 			}
 
 			if err := tx.Commit(ctx); err != nil {
 				return err
 			}
-
-			delete(ms.messageMap, msg.ID)
+			// Remove from cache after successful sending
+			ms.sentMessageMap.Delete(msg.ID)
 			return nil
 		})
 	}
@@ -142,19 +149,18 @@ func (ms *MessageService) sendPendingMessages() error {
 }
 
 func (ms *MessageService) sendMessageToPhone(message models.Message) error {
-	err := ms.messageSendClient.SendMessage(types.MessageSendRequest{
+	if err := ms.messageSendClient.SendMessage(types.MessageSendRequest{
 		Content: message.Content,
 		To:      message.RecipientPhoneNumber,
-	})
-	if err != nil {
+	}); err != nil {
 		return err
 	}
 
-	messageId := message.ID
+	// Cache message ID and sending time in Redis
 	sendingTime := time.Now().Unix()
-	err = ms.redisClient.Set(context.Background(), messageId, sendingTime, 5*time.Hour).Err()
-	if err != nil {
+	if err := ms.redisClient.Set(context.Background(), message.ID, sendingTime, 5*time.Hour).Err(); err != nil {
 		log.Errorf("Failed to cache message ID to Redis: %v", err)
 	}
+
 	return nil
 }
