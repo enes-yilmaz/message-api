@@ -31,3 +31,8 @@ go get -u github.com/swaggo/swag/cmd/swag
 go install github.com/swaggo/swag/cmd/swag@latest
 ```
 
+### Additional Info
+```shell script
+# swagger url: http://localhost:4001/message-api/swagger/index.html
+```
+
