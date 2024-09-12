@@ -40,7 +40,7 @@ func (b *BaseClient) GET(url string, token ...string) (*fasthttp.Response, error
 		return nil, err
 	}
 	if res == nil {
-		return nil, fmt.Errorf("response returned nil, %v ", b.baseUrl+url)
+		return nil, fmt.Errorf("types returned nil, %v ", b.baseUrl+url)
 	}
 
 	return res, err

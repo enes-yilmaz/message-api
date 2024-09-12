@@ -9,7 +9,7 @@ import (
 )
 
 type IMessageRepository interface {
-	GetAllSentMessages() ([]models.Message, error)
+	GetSentMessages() ([]models.Message, error)
 	GetUnSentMessages() ([]models.Message, error)
 	BeginTransaction() (pgx.Tx, error)
 	MarkMessageAsSent(messageID string, tx pgx.Tx) error
@@ -23,7 +23,7 @@ func NewMessageRepository(dbPool *pgxpool.Pool) IMessageRepository {
 	return &MessageRepository{dbPool: dbPool}
 }
 
-func (mr *MessageRepository) GetAllSentMessages() ([]models.Message, error) {
+func (mr *MessageRepository) GetSentMessages() ([]models.Message, error) {
 	ctx := context.Background()
 	rows, err := mr.dbPool.Query(ctx, "SELECT * FROM messages WHERE sent = true")
 	if err != nil {

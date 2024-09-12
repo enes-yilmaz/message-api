@@ -52,7 +52,7 @@ func NewMessageService(messageRepository messageRepository.IMessageRepository) I
 
 func (ms *MessageService) GetSentMessages() ([]models.Message, error) {
 
-	messages, err := ms.messageRepository.GetAllSentMessages()
+	messages, err := ms.messageRepository.GetSentMessages()
 	if err != nil {
 		return nil, err
 	}
